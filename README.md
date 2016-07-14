@@ -1,2 +1,2 @@
 # pydhcp
-Pure Python DHCP server and library
+Pure Python DHCP server and library.
