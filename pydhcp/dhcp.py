@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+
+import argparse
 import array
 from binascii import hexlify, unhexlify
 import socket
@@ -6,6 +9,9 @@ import os
 import re
 import time
 from subprocess import Popen, PIPE
+import sys
+import fcntl
+import ipaddress
 
 
 # DHCP constants
@@ -56,10 +62,10 @@ DHCP_FIELDS = [
 ]
 
 DHCP_OPTIONS = [
-    {'id': 00, 'name': 'padding', 'length': 1, 'type': HEX},
-    {'id': 01, 'name': 'subnet_mask', 'length': 4, 'type': IP},
-    {'id': 03, 'name': 'router', 'length': 4, 'type': IP},
-    {'id': 06, 'name': 'dns', 'length': 4, 'type': IP},
+    {'id': 0, 'name': 'padding', 'length': 1, 'type': HEX},
+    {'id': 1, 'name': 'subnet_mask', 'length': 4, 'type': IP},
+    {'id': 3, 'name': 'router', 'length': 4, 'type': IP},
+    {'id': 6, 'name': 'dns', 'length': 4, 'type': IP},
     {'id': 12, 'name': 'hostname', 'length': 1, 'type': STR},
     {'id': 15, 'name': 'domain_name', 'length': 1, 'type': STR},
     {'id': 28, 'name': 'broadcast_address', 'length': 4, 'type': IP},
@@ -71,6 +77,42 @@ DHCP_OPTIONS = [
     {'id': 55, 'name': 'parameter_request', 'length': 0, 'type': HEX},
     {'id': 61, 'name': 'client_id', 'length': 6, 'type': MAC},
 ]
+
+
+def error(message):
+    sys.exit('Error: %s' % (message))
+
+
+class IfConfigParser(object):
+
+    patterns = [
+        r'.*inet\s+(?P<ip>\d+.\d+.\d+.\d+)',
+    ]
+
+    def __init__(self, interface):
+        self.interface = interface
+        self.parse()
+
+    def parse(self):
+        output, error, rc = self.exec_cmd(['ifconfig', self.interface])
+
+        if rc:
+            return False
+
+        for p in self.patterns:
+            try:
+                m = re.search(p, output).groupdict()
+                return m['ip']
+            except:
+                continue
+
+        return False
+
+    def exec_cmd(self, command):
+        proc = Popen(command, stdout=PIPE, stderr=PIPE)
+        (stdout, stderr) = proc.communicate()
+        proc.wait()
+        return (stdout, stderr, proc.returncode)
 
 
 class DhcpOption(object):
@@ -185,20 +227,6 @@ class DhcpOptions(object):
             setattr(self, k, v)
 
 
-def exec_cmd(cmd_args):
-    proc = Popen(cmd_args, stdout=PIPE, stderr=PIPE)
-    (stdout, stderr) = proc.communicate()
-    proc.wait()
-    return (stdout, stderr, proc.returncode)
-
-
-class Lease(object):
-
-    def __init__(self, ip, mac):
-        self.ip = ip
-        self.mac = mac
-
-
 class DhcpPacket(object):
 
     def __init__(self, packet=None, **kwargs):
@@ -248,7 +276,7 @@ class DhcpPacket(object):
         return self._encode_fields() + self.option.data
 
     def encode(self):
-        packet = self._encode_fields() + self.option.data
+        packet = self.to_string()
         encoded = packet.decode('hex')
 
         return encoded
@@ -306,13 +334,17 @@ class DhcpServer(object):
         self.interface = interface
         self.ip = ip or self.get_ip(interface)
         self.sock = None
+
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
         self.bind()
 
     def bind(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(('', self.port))
+        self.sock.bind((self.ip, self.port))
 
     def get_ip(self, interface=None):
         """
@@ -321,16 +353,12 @@ class DhcpServer(object):
         if not interface:
             interface = self.interface
 
-        command = ['ifconfig', interface]
-        stdout, stderr, rc = exec_cmd(command)
+        ip = IfConfigParser(interface).parse()
 
-        if rc:
-            print 'could not get interface information'
+        if not ip:
+            error('could not parse interface %s information' % (interface))
 
-        m = re.search(r'inet\s+(?P<ip>\d+.\d+.\d+.\d+)', stdout, re.MULTILINE)
-        if m:
-            m = m.groupdict()
-            return m['ip']
+        return ip
 
     def nak(self, dhcp):
         nak = dhcp
@@ -362,7 +390,7 @@ class DhcpServer(object):
         print offer.to_string()
         self.sock.sendto(offer.encode(), ('<broadcast>', 68))
 
-    def start(self):
+    def start_server(self):
         print 'dhcp server started'
         while True:
             data = self.sock.recv(4096)
@@ -375,5 +403,36 @@ class DhcpServer(object):
                 self.ack(dhcp)
 
 
-d = DhcpServer(interface='en0')
-d.start()
+class Lease(object):
+
+    def __init__(self, ip=None, mac=None):
+        self.ip = ip
+        self.mac = mac
+        self.lease_time = time.time()
+
+
+class Leases(object):
+
+    def __init__(self, subnet, start, end):
+        self.leases = []
+        for i in range in (start, end):
+            ip = None
+            lease = Lease()
+
+    def add(self, mac, ip=None):
+        lease = Lease(mac=mac, ip=ip)
+        leases.append(lease)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(prog='pydhcp')
+    parser.add_argument('--interface', help='Interface to service requests')
+    parser.add_argument('--subnet', help='Subnet to service requests')
+    parser.add_argument('--start', help='Start of client IP pool', default='100')
+    parser.add_argument('--end', help='End of client IP pool', default='150')
+    parser.add_argument('--mac-addresses', help='List of MAC addresses to serve')
+    parser.add_argument('--leases', help='List of leases (MAC/IP pairs)')
+    args = parser.parse_args()
+    kwargs = vars(args)
+    d = DhcpServer(**kwargs)
+    d.start_server()
