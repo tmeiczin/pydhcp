@@ -3,13 +3,12 @@
 import argparse
 import array
 from binascii import hexlify, unhexlify
+import re
 import socket
 import struct
-import os
-import re
-import time
 from subprocess import Popen, PIPE
 import sys
+import time
 import fcntl
 import ipaddress
 
@@ -24,17 +23,6 @@ DHCP_NAK = 6
 DHCP_RELEASE = 7
 DHCP_INFORM = 8
 DHCP_MAGIC_COOKIE = 0x63825363
-
-DHCP_OPERATIONS = {
-    1: 'discover',
-    2: 'offer',
-    3: 'request',
-    4: 'decline',
-    5: 'ack',
-    6: 'nak',
-    7: 'release',
-    7: 'inform',
-}
 
 # Types
 INT = '_int'
@@ -94,6 +82,10 @@ class IfConfigParser(object):
         self.parse()
 
     def parse(self):
+        if not self.interface:
+
+            return False
+
         output, error, rc = self.exec_cmd(['ifconfig', self.interface])
 
         if rc:
@@ -114,6 +106,29 @@ class IfConfigParser(object):
         proc.wait()
         return (stdout, stderr, proc.returncode)
 
+
+class Encode(object):
+
+    def __init__(self, value):
+        self.value = value
+
+    def _int(self):
+        return format(self.value, '0%sx' % (2 * self.length))
+
+    def _ip(self):
+        return socket.inet_aton(self.value).encode('hex')
+
+    def _mac(self):
+        return self.value.replace(':', '').lower()
+
+    def _str(self):
+        return ''.join(x.encode('hex') for x in self.value)
+
+    def _hex(self):
+        return self.value
+
+    def _tlv_encode(self, t, l, v):
+        return format(t, '02x') + format(l, '02x') + v
 
 class DhcpOption(object):
 
@@ -178,7 +193,7 @@ class DhcpOptions(object):
     def __init__(self, options=None, **kwargs):
 
         if options:
-            self._tlv_unpack(options)
+            self._decode(options)
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -198,7 +213,7 @@ class DhcpOptions(object):
 
         return data
 
-    def _tlv_unpack(self, tlv):
+    def _decode(self, tlv):
         options = {}
 
         while(tlv):
@@ -230,6 +245,7 @@ class DhcpOptions(object):
 class DhcpPacket(object):
 
     def __init__(self, packet=None, **kwargs):
+        self.message_type = None
         options = None
         self._defaults()
 
@@ -324,7 +340,7 @@ class DhcpAck(DhcpPacket):
 
     def __init__(self, packet=None, **kwargs):
         super(DhcpAck, self).__init__(packet=packet, kwargs=kwargs)
-        offer.message_type = DHCP_OFFER
+        self.message_type = DHCP_OFFER
 
 
 class DhcpServer(object):
@@ -337,8 +353,20 @@ class DhcpServer(object):
 
         for k, v in kwargs.items():
             setattr(self, k, v)
-
+        self.create_lease_db()
         self.bind()
+
+    def create_lease_db(self):
+        if not self.subnet:
+            self.subnet = self.ip
+
+        m = re.search(r'(?P<subnet>\d+.\d+.\d+)', self.subnet)
+        if not m:
+            print 'invalid subnet'
+            self.leases = None
+
+        m = m.groupdict()
+        self.leases = Leases(m['subnet'], int(self.start), int(self.end))
 
     def bind(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -360,9 +388,13 @@ class DhcpServer(object):
 
         return ip
 
+    def ack(self, dhcp):
+        ack = dhcp
+        ack.message_type = DHCP_ACK
+
     def nak(self, dhcp):
         nak = dhcp
-        nak.message_type = DHCP_ACK
+        nak.message_type = DHCP_NAK
 
     def offer(self, dhcp):
         offer = dhcp
@@ -415,13 +447,31 @@ class Leases(object):
 
     def __init__(self, subnet, start, end):
         self.leases = []
-        for i in range in (start, end):
-            ip = None
-            lease = Lease()
+        self.subnet = subnet
+        self.start = start
+        self.end = end
+
+        for i in range(self.start, self.end):
+            ip = '%s.%s' % (self.subnet, i)
+            lease = Lease(ip=ip)
 
     def add(self, mac, ip=None):
         lease = Lease(mac=mac, ip=ip)
         leases.append(lease)
+
+    def find_mac(self, mac):
+        for lease in self.leases:
+            if lease.mac == mac:
+                return lease 
+
+        return None
+
+    def find_ip(self, ip):
+        for lease in self.leases:
+            if lease.ip == ip: 
+                return lease 
+
+        return None
 
 
 if __name__ == "__main__":
