@@ -73,8 +73,12 @@ def error(message):
 
 class IfConfigParser(object):
 
+    # An example of the textual output that this regex will parse:
+    # inet 1.1.1.1
+    # inet addr 1.1.1.1
+    # inet addr:1.1.1.1
     patterns = [
-        r'.*inet\s+(?P<ip>\d+.\d+.\d+.\d+)',
+        r'.*inet(\s*addr)?\s*:?\s*(?P<ip>\d+.\d+.\d+.\d+)'
     ]
 
     def __init__(self, interface):
