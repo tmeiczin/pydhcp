@@ -10,6 +10,7 @@ from subprocess import Popen, PIPE
 import sys
 import time
 import fcntl
+import IN
 import ipaddress
 
 
@@ -73,8 +74,12 @@ def error(message):
 
 class IfConfigParser(object):
 
+    # An example of the textual output that this regex will parse:
+    # inet 1.1.1.1
+    # inet addr 1.1.1.1
+    # inet addr:1.1.1.1
     patterns = [
-        r'.*inet\s+(?P<ip>\d+.\d+.\d+.\d+)',
+        r'.*inet(\s*addr)?\s*:?\s*(?P<ip>\d+.\d+.\d+.\d+)'
     ]
 
     def __init__(self, interface):
@@ -301,6 +306,7 @@ class DhcpPacket(object):
         value = value or 0
         return format(int(value), '0%sx' % (2 * length))
 
+
     def _int_decode(self, value):
         return int(value, 16)
 
@@ -372,6 +378,8 @@ class DhcpServer(object):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # 25 here corresponds to SO_BINDTODEVICE, which is not exposed by Python (presumably for portability reasons).
+        self.sock.setsockopt(socket.SOL_SOCKET, 25, self.interface)
         self.sock.bind((self.ip, self.port))
 
     def get_ip(self, interface=None):
